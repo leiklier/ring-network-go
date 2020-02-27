@@ -106,11 +106,17 @@ func receiver() {
 			return
 
 		default:
+			localIP := peers.GetRelativeTo(peers.Self, 0)
 			var message Message
 			nBytes, _, _ := conn.ReadFrom(buffer[0:])
 			json.Unmarshal(buffer[:nBytes], &message)
 
-			if message.ReceiverIP != peers.GetRelativeTo(peers.Self, 0) && message.ReceiverIP != BroadcastIP {
+			if message.SenderIP == localIP {
+				// We do not want to receive messages from ourself
+				continue
+			}
+
+			if message.ReceiverIP != localIP && message.ReceiverIP != BroadcastIP {
 				// The message was not intended for us
 				continue
 			}
