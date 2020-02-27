@@ -27,12 +27,7 @@ type ControlSignal struct {
 
 var controlChannel = make(chan ControlSignal, 100)
 
-type ChangeEvent struct {
-	Event string // Added or Removed
-	Peer  string
-}
-
-var changeChannel = make(chan ChangeEvent, 100)
+var didChangeChannel = make(chan bool, 100)
 
 // Local variables
 var isInitialized = false
@@ -46,14 +41,6 @@ func Set(IPs []string) {
 	controlSignal := ControlSignal{
 		Command: Replace,
 		Payload: IPs,
-	}
-	controlChannel <- controlSignal
-}
-
-func BecomeHead() {
-	initialize()
-	controlSignal := ControlSignal{
-		Command: Head,
 	}
 	controlChannel <- controlSignal
 }
@@ -81,15 +68,9 @@ func AddTail(IP string) {
 }
 
 // PollUpdate blocks until a new change has occured in the peers
-// when such a change has occured, it returns a ChangeEvent struct
-// which has the following format:
-// type ChangeEvent struct {
-// 		Event string // Added or Removed
-//		Peer  string
-// }
-func PollUpdate() ChangeEvent {
+func PollDidUpdate() {
 	initialize()
-	return <-changeChannel
+	<-didChangeChannel
 }
 
 // GetAll returns the array of peers in the correct order
@@ -157,40 +138,26 @@ func peersServer() {
 			break
 
 		case Append:
-			peers = append(peers, controlSignal.Payload...)
-			for _, newPeer := range controlSignal.Payload {
-				changeEvent := ChangeEvent{
-					Event: Added,
-					Peer:  newPeer,
+			peerToAppend := controlSignal.Payload[0]
+
+			// Remove peerToAppend from peers
+			// if it already is in the list:
+			for i, peerInList := range peers {
+				if peerInList == peerToAppend {
+					copy(peers[i:], peers[i+1:]) // Shift peers[i+1:] left one index.
+					peers[len(peers)-1] = ""     // Erase last element (write zero value).
+					peers = peers[:len(peers)-1] // Truncate slice.
+					break
 				}
-				changeChannel <- changeEvent
 			}
+
+			peers = append(peers, peerToAppend)
+			didChangeChannel <- true
 			break
 
 		case Replace:
 			peers = controlSignal.Payload
-			changeEvent := ChangeEvent{
-				Event: Replaced,
-			}
-			changeChannel <- changeEvent
-			break
-
-		case Head:
-			var rotation int
-			var val string
-			var newPeers []string
-
-			for rotation, val = range peers {
-				if val == localIP {
-					break
-				}
-			}
-			size := len(peers)
-			for i := 0; i < rotation; i++ {
-				newPeers = peers[1:size]
-				newPeers = append(newPeers, peers[0])
-				peers = newPeers
-			}
+			didChangeChannel <- true
 			break
 
 		case Delete:
@@ -200,11 +167,7 @@ func peersServer() {
 					copy(peers[i:], peers[i+1:]) // Shift peers[i+1:] left one index.
 					peers[len(peers)-1] = ""     // Erase last element (write zero value).
 					peers = peers[:len(peers)-1] // Truncate slice.
-					changeEvent := ChangeEvent{
-						Event: Removed,
-						Peer:  peer,
-					}
-					changeChannel <- changeEvent
+					didChangeChannel <- true
 					break
 				}
 			}

@@ -54,10 +54,10 @@ func ServerDisconnected() string {
 	return <-gDisconnectedFromServerChannel
 }
 
-// SendMessage takes a byte array and sends it
+// Send takes a byte array and sends it
 // to the node which it is connected to by ConnectTo
 // purpose is used to filter the message on the receiving end
-func SendMessage(purpose string, data []byte) {
+func Send(purpose string, data []byte) {
 	initialize()
 
 	localIP := peers.GetRelativeTo(peers.Self, 0)
@@ -75,7 +75,7 @@ func Receive(purpose string) []byte {
 	return <-receivers.GetChannel(purpose)
 }
 
-func Start() {
+func Initialize() {
 	initialize()
 }
 
@@ -95,7 +95,12 @@ func client() {
 
 	// We only want one active client at all times:
 	for {
-		serverIP := <-gServerIPChannel
+		newServerIp := <-gServerIPChannel
+		if newServerIp == serverIP {
+			// No need to just reconnect
+			continue
+		}
+		serverIP = newServerIp
 		shouldDisconnectChannel <- true
 		shouldDisconnectChannel = make(chan bool, 10)
 		go handleOutboundConnection(serverIP, shouldDisconnectChannel)

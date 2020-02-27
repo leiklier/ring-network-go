@@ -1,10 +1,13 @@
 package ring
 
 import (
+	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"../bcast"
+	"../messages"
 	"../peers"
 )
 
@@ -13,6 +16,14 @@ import (
 const gJoinMaxRetryAttempts = 5
 const gJoinMessage = "JOIN"
 const gJoinAckMessage = "JOIN_ACK"
+
+var gJoinAcceptorIsRunning = false
+var gJoinAcceptorIsRunningMutex sync.Mutex
+var gShouldStopJoinAcceptorChannel = make(chan bool)
+
+const (
+	NewPeersList = "_NewPeersList"
+)
 
 var gIsInitialized = false
 
@@ -28,6 +39,8 @@ func Init() {
 		return
 	}
 	gIsInitialized = true
+	messages.Initialize()
+
 	go udpMessageReceiver()
 
 	didJoinExistingNetwork := tryJoiningExistingNetwork()
@@ -41,25 +54,88 @@ func Init() {
 }
 
 func createNewNetwork() {
-	shouldShutDownChannel := make(chan bool, 10)
-	go listenJoin(shouldShutDownChannel)
+	go newPeersReceiver()
+	go ringMaintainer()
 }
 
 func ringMaintainer() {
-	nextNode := peers.GetRelativeTo(peers.Self, 1)
-	for {
-		peersChange := peers.PollUpdate()
 
-		if peersChange.Event == peers.Removed && peersChange.Peer == nextNode {
-			// The peer in which we were connected to disconnected,
-			// so connect to the node after that and broadcast the change:
+	for {
+		headPeer := peers.GetRelativeTo(peers.Head, 0)
+		selfPeer := peers.GetRelativeTo(peers.Self, 0)
+		nextPeer := peers.GetRelativeTo(peers.Self, 1)
+
+		if nextPeer != selfPeer {
+			messages.ConnectTo(nextPeer)
 		}
+
+		if selfPeer == headPeer {
+			startJoinAcceptor()
+		} else {
+			stopJoinAcceptor()
+		}
+
+		peers.PollDidUpdate()
+		fmt.Println(peers.GetAll())
 	}
 }
 
-func listenJoin(shouldShutDownChannel chan bool) {
+func newPeersReceiver() {
+	for {
+		var newPeersList []string
+
+		serializedNewPeersList := messages.Receive(NewPeersList)
+		json.Unmarshal(serializedNewPeersList, newPeersList)
+
+		peers.Set(newPeersList)
+	}
+}
+
+func nextNodeWatcher() {
+	for {
+		nextPeerIP := messages.ServerDisconnected()
+		fmt.Println("did disconnect")
+		peers.Remove(nextPeerIP)
+
+		newNextPeer := peers.GetRelativeTo(peers.Self, 1)
+		// We have to reconnect here in order for the
+		// message to be sent:
+		messages.ConnectTo(newNextPeer)
+		serializedPeersList, _ := json.Marshal(peers.GetAll())
+		messages.Send(NewPeersList, serializedPeersList)
+
+	}
+}
+
+func startJoinAcceptor() {
+	gJoinAcceptorIsRunningMutex.Lock()
+	if !gJoinAcceptorIsRunning {
+		go joinAcceptor()
+	}
+	gJoinAcceptorIsRunningMutex.Unlock()
+}
+
+func stopJoinAcceptor() {
+	gJoinAcceptorIsRunningMutex.Lock()
+	if gJoinAcceptorIsRunning {
+		gShouldStopJoinAcceptorChannel <- true
+	}
+	gJoinAcceptorIsRunningMutex.Unlock()
+}
+
+func joinAcceptor() {
+	gJoinAcceptorIsRunningMutex.Lock()
+	gJoinAcceptorIsRunning = true
+	gJoinAcceptorIsRunningMutex.Unlock()
+
 	bcast.StartReceiving()
-	defer bcast.StopReceiving()
+	defer func() {
+		gJoinAcceptorIsRunningMutex.Lock()
+		gJoinAcceptorIsRunning = false
+		gJoinAcceptorIsRunningMutex.Unlock()
+
+		bcast.StopReceiving()
+	}()
 
 	for {
 		select {
@@ -67,9 +143,14 @@ func listenJoin(shouldShutDownChannel chan bool) {
 			ipOfNodeTryingToJoin := joinMessage.SenderIP
 			bcast.SendTo(ipOfNodeTryingToJoin, []byte(gJoinAckMessage))
 			peers.AddTail(ipOfNodeTryingToJoin)
+
+			// Let all nodes get the new list of peers s.t.
+			// the ring will expand:
+			serializedPeersList, _ := json.Marshal(peers.GetAll())
+			messages.Send(NewPeersList, serializedPeersList)
 			break
 
-		case <-shouldShutDownChannel:
+		case <-gShouldStopJoinAcceptorChannel:
 			return
 		}
 	}
@@ -79,9 +160,9 @@ func tryJoiningExistingNetwork() bool {
 	isExistingNetwork := false
 
 	bcast.StartReceiving()
-	defer bcast.StopReceiving()
+	//defer bcast.StopReceiving()
 
-	joinMessageInterval := 200 * time.Millisecond
+	joinMessageInterval := 250 * time.Millisecond
 	shouldSendJoinMessageTicker := time.NewTicker(joinMessageInterval)
 
 	for attemptNo := 0; attemptNo < gJoinMaxRetryAttempts; attemptNo++ {
@@ -96,6 +177,8 @@ func tryJoiningExistingNetwork() bool {
 	}
 
 	if !isExistingNetwork {
+		go newPeersReceiver()
+		go ringMaintainer()
 		return false
 	}
 
