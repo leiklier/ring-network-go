@@ -47,7 +47,6 @@ func SendTo(receiverIP string, data []byte) {
 
 func Receive() (string, []byte) {
 	initialize()
-	StartReceiving()
 	message := <-gReceiveChannel
 	return message.SenderIP, message.Data
 }
